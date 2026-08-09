@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Check, ChevronLeft, ChevronRight, Settings, X, Plus, Trash2, Activity, ChevronDown, ChevronUp, PlayCircle, Copy, SkipForward, ImagePlus, Sunrise } from 'lucide-react';
+import { Check, ChevronLeft, ChevronRight, Settings, X, Plus, Trash2, Activity, ChevronDown, ChevronUp, PlayCircle, Copy, SkipForward, ImagePlus, Sunrise, GripVertical, Calendar as CalendarIcon } from 'lucide-react';
 
 const FONTS = `@import url('https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap');`;
 
@@ -710,7 +710,7 @@ function FitnessModule() {
       <div style={{ padding: '20px 16px 16px', borderBottom: `1px solid ${COLORS.line}` }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
           <div>
-            <div style={{ fontFamily: 'Oswald, sans-serif', fontSize: 13, letterSpacing: 3, color: COLORS.textMuted }}>GRIND LOG</div>
+            <div style={{ fontFamily: 'Oswald, sans-serif', fontSize: 13, letterSpacing: 3, color: COLORS.textMuted }}>SUCCESS</div>
             <div style={{ fontFamily: 'Oswald, sans-serif', fontSize: 32, fontWeight: 700, lineHeight: 1.1, marginTop: 2 }}>
               DAY {displayDayNum}<span style={{ color: COLORS.textMuted, fontSize: 20 }}>/45</span>
             </div>
@@ -1359,8 +1359,8 @@ function SettingsModal({ draftBlocks, setDraftBlocks, draftStart, setDraftStart,
   }
 
   return (
-    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'flex-end', zIndex: 50 }}>
-      <div style={{ background: COLORS.bg, width: '100%', maxHeight: '85vh', overflowY: 'auto', borderRadius: '16px 16px 0 0', border: `1px solid ${COLORS.line}`, borderBottom: 'none', padding: 20 }}>
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center', zIndex: 50 }}>
+      <div style={{ background: COLORS.bg, width: '100%', maxWidth: 560, margin: '0 auto', maxHeight: '85vh', overflowY: 'auto', borderRadius: '16px 16px 0 0', border: `1px solid ${COLORS.line}`, borderBottom: 'none', padding: 20, color: COLORS.text }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
           <span style={{ fontFamily: 'Oswald, sans-serif', fontSize: 18, letterSpacing: 1 }}>SETTINGS</span>
           <button onClick={onClose} style={{ background: 'none', border: 'none', color: COLORS.textMuted, cursor: 'pointer' }}>
@@ -1558,6 +1558,124 @@ function minutesToLabel(mins) {
   return `${h12}:${String(m).padStart(2, '0')} ${ampm}`;
 }
 
+// ---------------------------------------------------------------------------
+// Google Calendar (read-only)
+// Uses Google Identity Services token flow entirely client-side. No backend.
+// The OAuth client ID is supplied by the page via window.__GOOGLE_CLIENT_ID__.
+// ---------------------------------------------------------------------------
+const GCAL_SCOPE = 'https://www.googleapis.com/auth/calendar.readonly';
+
+let gsiScriptPromise = null;
+let gcalTokenClient = null;
+let gcalToken = null;
+let gcalTokenExpiresAt = 0;
+
+function getGoogleClientId() {
+  return (typeof window !== 'undefined' && window.__GOOGLE_CLIENT_ID__) || '';
+}
+
+function loadGsiScript() {
+  if (gsiScriptPromise) return gsiScriptPromise;
+  gsiScriptPromise = new Promise((resolve, reject) => {
+    if (typeof document === 'undefined') return reject(new Error('no document'));
+    if (window.google && window.google.accounts && window.google.accounts.oauth2) return resolve();
+    const existing = document.querySelector('script[data-gsi="1"]');
+    if (existing) {
+      existing.addEventListener('load', () => resolve());
+      existing.addEventListener('error', () => reject(new Error('Could not load Google sign-in')));
+      return;
+    }
+    const s = document.createElement('script');
+    s.src = 'https://accounts.google.com/gsi/client';
+    s.async = true;
+    s.defer = true;
+    s.dataset.gsi = '1';
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error('Could not load Google sign-in'));
+    document.head.appendChild(s);
+  });
+  return gsiScriptPromise;
+}
+
+// Requests an access token. `silent` avoids showing the consent popup, which
+// works once the user has already granted access in this browser.
+function requestGcalToken({ silent }) {
+  return new Promise(async (resolve, reject) => {
+    const clientId = getGoogleClientId();
+    if (!clientId) return reject(new Error('NO_CLIENT_ID'));
+    try {
+      await loadGsiScript();
+    } catch (e) {
+      return reject(e);
+    }
+    if (!window.google || !window.google.accounts || !window.google.accounts.oauth2) {
+      return reject(new Error('Google sign-in unavailable'));
+    }
+    try {
+      gcalTokenClient = window.google.accounts.oauth2.initTokenClient({
+        client_id: clientId,
+        scope: GCAL_SCOPE,
+        callback: (resp) => {
+          if (resp && resp.access_token) {
+            gcalToken = resp.access_token;
+            gcalTokenExpiresAt = Date.now() + (Number(resp.expires_in || 3600) - 60) * 1000;
+            resolve(gcalToken);
+          } else {
+            reject(new Error('No access token returned'));
+          }
+        },
+        error_callback: (err) => reject(new Error((err && err.type) || 'Authorization failed')),
+      });
+      gcalTokenClient.requestAccessToken({ prompt: silent ? '' : 'consent' });
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
+async function ensureGcalToken({ silent }) {
+  if (gcalToken && Date.now() < gcalTokenExpiresAt) return gcalToken;
+  return requestGcalToken({ silent });
+}
+
+async function fetchGcalEvents(startDateStr, endDateStr, { silent = true } = {}) {
+  const token = await ensureGcalToken({ silent });
+  const timeMin = new Date(`${startDateStr}T00:00:00`).toISOString();
+  const endD = parseDate(endDateStr);
+  endD.setDate(endD.getDate() + 1);
+  const timeMax = endD.toISOString();
+  const url =
+    'https://www.googleapis.com/calendar/v3/calendars/primary/events' +
+    `?timeMin=${encodeURIComponent(timeMin)}&timeMax=${encodeURIComponent(timeMax)}` +
+    '&singleEvents=true&orderBy=startTime&maxResults=250';
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (res.status === 401) {
+    gcalToken = null;
+    throw new Error('AUTH_EXPIRED');
+  }
+  if (!res.ok) throw new Error(`Calendar error ${res.status}`);
+  const data = await res.json();
+  return (data.items || [])
+    .filter((ev) => ev.status !== 'cancelled')
+    .map((ev) => {
+      const allDay = !!(ev.start && ev.start.date);
+      const startRaw = (ev.start && (ev.start.dateTime || ev.start.date)) || null;
+      const endRaw = (ev.end && (ev.end.dateTime || ev.end.date)) || null;
+      const startD = startRaw ? new Date(allDay ? `${ev.start.date}T00:00:00` : startRaw) : null;
+      const endDt = endRaw ? new Date(allDay ? `${ev.end.date}T00:00:00` : endRaw) : null;
+      return {
+        id: ev.id,
+        title: ev.summary || '(no title)',
+        allDay,
+        dateStr: startD ? formatDate(startD) : null,
+        startMinutes: startD && !allDay ? startD.getHours() * 60 + startD.getMinutes() : 0,
+        endMinutes: endDt && !allDay ? endDt.getHours() * 60 + endDt.getMinutes() : 0,
+        location: ev.location || '',
+      };
+    })
+    .filter((ev) => ev.dateStr);
+}
+
 const DEFAULT_SCHEDULE_TEMPLATE = [
   { id: 'wake', label: 'Wake / Get moving', start: '04:00', end: '05:30', daysOfWeek: null },
   { id: 'workout', label: 'Workout (lift + cardio)', start: '05:30', end: '07:30', daysOfWeek: null },
@@ -1596,6 +1714,59 @@ function ScheduleModule() {
   const [newEventLabel, setNewEventLabel] = useState('');
   const [newEventStart, setNewEventStart] = useState('12:00');
   const [newEventEnd, setNewEventEnd] = useState('13:00');
+  const [view, setView] = useState('day');
+  const [gcalEvents, setGcalEvents] = useState([]);
+  const [gcalStatus, setGcalStatus] = useState('idle'); // idle | connecting | connected | error | unavailable
+  const [gcalError, setGcalError] = useState('');
+
+  const weekDates = React.useMemo(() => {
+    return Array.from({ length: 7 }, (_, i) => addDays(todayStr, i));
+  }, [todayStr]);
+
+  async function loadCalendar({ silent }) {
+    if (!getGoogleClientId()) {
+      setGcalStatus('unavailable');
+      return;
+    }
+    setGcalStatus('connecting');
+    setGcalError('');
+    try {
+      const evs = await fetchGcalEvents(weekDates[0], weekDates[6], { silent });
+      setGcalEvents(evs);
+      setGcalStatus('connected');
+      try {
+        await safeStorage.set('gcal-connected', '1', false);
+      } catch (e) {}
+    } catch (e) {
+      const msg = e && e.message;
+      if (msg === 'NO_CLIENT_ID') setGcalStatus('unavailable');
+      else {
+        setGcalStatus(silent ? 'idle' : 'error');
+        if (!silent) setGcalError(msg === 'AUTH_EXPIRED' ? 'Session expired — reconnect.' : msg || 'Could not reach Google Calendar.');
+      }
+    }
+  }
+
+  useEffect(() => {
+    (async () => {
+      if (!getGoogleClientId()) {
+        setGcalStatus('unavailable');
+        return;
+      }
+      let wasConnected = false;
+      try {
+        const res = await safeStorage.get('gcal-connected', false);
+        wasConnected = !!(res && res.value);
+      } catch (e) {}
+      if (wasConnected) loadCalendar({ silent: true });
+    })();
+  }, []);
+
+  function eventsForDate(dateStr) {
+    return gcalEvents
+      .filter((ev) => ev.dateStr === dateStr)
+      .sort((a, b) => (a.allDay === b.allDay ? a.startMinutes - b.startMinutes : a.allDay ? -1 : 1));
+  }
 
   useEffect(() => {
     (async () => {
@@ -1711,9 +1882,171 @@ function ScheduleModule() {
 
   const current = dayCache[selectedDate];
   const sortedBlocks = current ? [...current.blocks].sort((a, b) => timeToMinutes(a.start) - timeToMinutes(b.start)) : [];
+  const todaysEvents = eventsForDate(selectedDate);
+
+  const calendarBanner =
+    gcalStatus === 'unavailable' ? null : gcalStatus === 'connected' ? (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+        <span style={{ fontFamily: 'Oswald, sans-serif', fontSize: 10, letterSpacing: 1, color: COLORS.success }}>
+          CALENDAR CONNECTED
+        </span>
+        <button
+          onClick={() => loadCalendar({ silent: true })}
+          style={{ background: 'none', border: 'none', color: COLORS.textMuted, fontFamily: 'Oswald, sans-serif', fontSize: 10, letterSpacing: 1, cursor: 'pointer', padding: 0 }}
+        >
+          REFRESH
+        </button>
+      </div>
+    ) : (
+      <div style={{ ...cardStyle, padding: '12px 14px', marginBottom: 14 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <CalendarIcon size={15} color={COLORS.accentGold} />
+            <span style={{ fontFamily: 'Inter, sans-serif', fontSize: 12.5, color: COLORS.text }}>Google Calendar</span>
+          </div>
+          <button
+            onClick={() => loadCalendar({ silent: false })}
+            disabled={gcalStatus === 'connecting'}
+            style={{
+              padding: '6px 12px',
+              background: COLORS.accent,
+              border: 'none',
+              borderRadius: 6,
+              color: '#fff',
+              fontFamily: 'Oswald, sans-serif',
+              fontSize: 10,
+              letterSpacing: 1,
+              cursor: 'pointer',
+            }}
+          >
+            {gcalStatus === 'connecting' ? 'CONNECTING…' : 'CONNECT'}
+          </button>
+        </div>
+        {gcalError && <div style={{ color: COLORS.accent, fontSize: 11, marginTop: 8, lineHeight: 1.4 }}>{gcalError}</div>}
+      </div>
+    );
+
+  function EventRow({ ev, compact }) {
+    return (
+      <div
+        style={{
+          ...cardStyle,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 12,
+          padding: compact ? '8px 12px' : '12px 14px',
+          borderLeft: `3px solid ${COLORS.accentGold}`,
+          marginBottom: 8,
+        }}
+      >
+        <div style={{ width: 78, flexShrink: 0 }}>
+          {ev.allDay ? (
+            <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 10, color: COLORS.accentGold }}>ALL DAY</div>
+          ) : (
+            <>
+              <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 11, color: COLORS.accentGold }}>{minutesToLabel(ev.startMinutes)}</div>
+              <div style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 10, color: COLORS.textMuted }}>{minutesToLabel(ev.endMinutes)}</div>
+            </>
+          )}
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontFamily: 'Inter, sans-serif', fontSize: 13, color: COLORS.text }}>{ev.title}</div>
+          {ev.location && (
+            <div style={{ fontFamily: 'Inter, sans-serif', fontSize: 10.5, color: COLORS.textMuted, marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {ev.location}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (view === 'week') {
+    return (
+      <div style={{ padding: 16 }}>
+        <div style={{ display: 'flex', background: COLORS.surface, borderRadius: 8, padding: 3, border: `1px solid ${COLORS.line}`, marginBottom: 14 }}>
+          {['day', 'week'].map((v) => (
+            <button
+              key={v}
+              onClick={() => setView(v)}
+              style={{
+                flex: 1,
+                padding: '8px 0',
+                background: view === v ? COLORS.accent : 'transparent',
+                color: view === v ? '#fff' : COLORS.textMuted,
+                border: 'none',
+                borderRadius: 6,
+                fontFamily: 'Oswald, sans-serif',
+                fontSize: 12,
+                letterSpacing: 2,
+                cursor: 'pointer',
+              }}
+            >
+              {v.toUpperCase()}
+            </button>
+          ))}
+        </div>
+
+        {calendarBanner}
+
+        {weekDates.map((d) => {
+          const evs = eventsForDate(d);
+          return (
+            <div key={d} style={{ marginBottom: 18 }}>
+              <div
+                style={{
+                  fontFamily: 'Oswald, sans-serif',
+                  fontSize: 12,
+                  letterSpacing: 1.5,
+                  color: d === todayStr ? COLORS.accent : COLORS.textMuted,
+                  marginBottom: 8,
+                  paddingBottom: 6,
+                  borderBottom: `1px solid ${COLORS.line}`,
+                }}
+              >
+                {niceLabel(d, todayStr)}
+              </div>
+              {evs.length === 0 ? (
+                <div style={{ fontFamily: 'Inter, sans-serif', fontSize: 11.5, color: COLORS.textMuted, fontStyle: 'italic' }}>
+                  {gcalStatus === 'connected' ? 'No meetings' : '—'}
+                </div>
+              ) : (
+                evs.map((ev) => <EventRow key={ev.id} ev={ev} compact />)
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
 
   return (
     <div style={{ padding: 16 }}>
+      <div style={{ display: 'flex', background: COLORS.surface, borderRadius: 8, padding: 3, border: `1px solid ${COLORS.line}`, marginBottom: 14 }}>
+        {['day', 'week'].map((v) => (
+          <button
+            key={v}
+            onClick={() => setView(v)}
+            style={{
+              flex: 1,
+              padding: '8px 0',
+              background: view === v ? COLORS.accent : 'transparent',
+              color: view === v ? '#fff' : COLORS.textMuted,
+              border: 'none',
+              borderRadius: 6,
+              fontFamily: 'Oswald, sans-serif',
+              fontSize: 12,
+              letterSpacing: 2,
+              cursor: 'pointer',
+            }}
+          >
+            {v.toUpperCase()}
+          </button>
+        ))}
+      </div>
+
+      {calendarBanner}
+
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
         <button onClick={() => setSelectedDate(addDays(selectedDate, -1))} style={navBtnStyle}>
           <ChevronLeft size={20} />
@@ -1728,6 +2061,20 @@ function ScheduleModule() {
           </button>
         </div>
       </div>
+
+      {todaysEvents.length > 0 && (
+        <>
+          <div style={{ fontFamily: 'Oswald, sans-serif', fontSize: 11, letterSpacing: 1.5, color: COLORS.accentGold, marginBottom: 8 }}>
+            MEETINGS
+          </div>
+          {todaysEvents.map((ev) => (
+            <EventRow key={ev.id} ev={ev} />
+          ))}
+          <div style={{ fontFamily: 'Oswald, sans-serif', fontSize: 11, letterSpacing: 1.5, color: COLORS.textMuted, margin: '18px 0 8px' }}>
+            ROUTINE
+          </div>
+        </>
+      )}
 
       {sortedBlocks.map((b) => (
         <div key={b.id} style={{ ...cardStyle, display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px' }}>
@@ -1783,8 +2130,8 @@ function ScheduleModule() {
       )}
 
       {showSettings && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'flex-end', zIndex: 50 }}>
-          <div style={{ background: COLORS.bg, width: '100%', maxHeight: '85vh', overflowY: 'auto', borderRadius: '16px 16px 0 0', border: `1px solid ${COLORS.line}`, borderBottom: 'none', padding: 20 }}>
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'flex-end', justifyContent: 'center', zIndex: 50 }}>
+          <div style={{ background: COLORS.bg, width: '100%', maxWidth: 560, margin: '0 auto', maxHeight: '85vh', overflowY: 'auto', borderRadius: '16px 16px 0 0', border: `1px solid ${COLORS.line}`, borderBottom: 'none', padding: 20, color: COLORS.text }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
               <span style={{ fontFamily: 'Oswald, sans-serif', fontSize: 18, letterSpacing: 1 }}>DAILY ROUTINE</span>
               <button onClick={() => setShowSettings(false)} style={{ background: 'none', border: 'none', color: COLORS.textMuted, cursor: 'pointer' }}>
@@ -2330,11 +2677,139 @@ const PRIORITY_COLORS = {
   5: '#8B909A',
 };
 
+const FOCUS_COUNT = 5;
+
+function TaskRow({
+  task,
+  index,
+  dimmed,
+  isDragging,
+  onPointerDownGrip,
+  onToggle,
+  onRemove,
+  onMove,
+  buckets,
+  currentBucket,
+  showMoveControls,
+  rank,
+}) {
+  return (
+    <div
+      data-task-row="1"
+      style={{
+        ...cardStyle,
+        marginBottom: 8,
+        opacity: isDragging ? 0.4 : dimmed ? 0.55 : 1,
+        borderColor: isDragging ? COLORS.accentGold : task.done ? COLORS.line : COLORS.line,
+        transition: isDragging ? 'none' : 'opacity 0.15s',
+        touchAction: 'pan-y',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div
+          onPointerDown={onPointerDownGrip}
+          style={{
+            cursor: 'grab',
+            color: COLORS.textMuted,
+            display: 'flex',
+            alignItems: 'center',
+            padding: '4px 2px',
+            touchAction: 'none',
+            flexShrink: 0,
+          }}
+          aria-label="Drag to reorder"
+        >
+          <GripVertical size={16} />
+        </div>
+
+        {rank != null && (
+          <span
+            style={{
+              width: 20,
+              fontFamily: 'Oswald, sans-serif',
+              fontSize: 15,
+              color: rank === 1 ? COLORS.accent : COLORS.textMuted,
+              flexShrink: 0,
+            }}
+          >
+            {rank}
+          </span>
+        )}
+
+        <span
+          style={{
+            width: 8,
+            height: 8,
+            borderRadius: 4,
+            background: PRIORITY_COLORS[task.priority] || COLORS.textMuted,
+            flexShrink: 0,
+          }}
+          title={`Priority ${task.priority}`}
+        />
+
+        <span
+          style={{
+            flex: 1,
+            fontFamily: 'Inter, sans-serif',
+            fontSize: 13,
+            color: COLORS.text,
+            textDecoration: task.done ? 'line-through' : 'none',
+            opacity: task.done ? 0.5 : 1,
+            lineHeight: 1.4,
+          }}
+        >
+          {task.text}
+        </span>
+
+        <CheckCircle done={task.done} onToggle={onToggle} small />
+        <button
+          onClick={onRemove}
+          style={{ background: 'none', border: 'none', color: COLORS.textMuted, cursor: 'pointer', padding: 0, flexShrink: 0 }}
+          aria-label="Delete task"
+        >
+          <Trash2 size={14} />
+        </button>
+      </div>
+
+      {showMoveControls && !task.done && (
+        <div style={{ display: 'flex', gap: 6, marginTop: 8, paddingLeft: 26 }}>
+          {buckets
+            .filter((b) => b.id !== currentBucket)
+            .map((b) => (
+              <button
+                key={b.id}
+                onClick={() => onMove(b.id)}
+                style={{
+                  padding: '3px 9px',
+                  borderRadius: 5,
+                  border: `1px solid ${COLORS.line}`,
+                  background: 'none',
+                  color: COLORS.textMuted,
+                  fontFamily: 'Oswald, sans-serif',
+                  fontSize: 9,
+                  letterSpacing: 0.5,
+                  cursor: 'pointer',
+                }}
+              >
+                → {b.label}
+              </button>
+            ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TasksModule() {
   const [loading, setLoading] = useState(true);
   const [tasks, setTasks] = useState([]);
   const [newText, setNewText] = useState('');
   const [newPriority, setNewPriority] = useState(3);
+  const [showWaiting, setShowWaiting] = useState(false);
+  const [dragId, setDragId] = useState(null);
+
+  const dragState = React.useRef(null);
+  const listRef = React.useRef(null);
 
   useEffect(() => {
     (async () => {
@@ -2359,6 +2834,7 @@ function TasksModule() {
 
   function addTask() {
     if (!newText.trim()) return;
+    // New tasks land at the bottom of Today so they never displace the current focus.
     const next = [
       ...tasks,
       { id: `task_${Date.now()}`, text: newText.trim(), priority: newPriority, bucket: 'today', done: false, createdAt: Date.now() },
@@ -2380,6 +2856,64 @@ function TasksModule() {
     persist(tasks.filter((t) => t.id !== id));
   }
 
+  // Reorder within the Today bucket by moving `id` to position `toIdx`
+  // among today's tasks, preserving the rest of the array.
+  function reorderToday(id, toIdx) {
+    const todayIds = tasks.filter((t) => t.bucket === 'today').map((t) => t.id);
+    const from = todayIds.indexOf(id);
+    if (from === -1) return;
+    const clamped = Math.max(0, Math.min(todayIds.length - 1, toIdx));
+    if (from === clamped) return;
+    const nextIds = [...todayIds];
+    nextIds.splice(from, 1);
+    nextIds.splice(clamped, 0, id);
+
+    const byId = Object.fromEntries(tasks.map((t) => [t.id, t]));
+    const reorderedToday = nextIds.map((tid) => byId[tid]);
+    let cursor = 0;
+    const next = tasks.map((t) => (t.bucket === 'today' ? reorderedToday[cursor++] : t));
+    persist(next);
+  }
+
+  function handleGripDown(e, taskId) {
+    e.preventDefault();
+    const rows = listRef.current ? Array.from(listRef.current.querySelectorAll('[data-task-row="1"]')) : [];
+    const rects = rows.map((r) => r.getBoundingClientRect());
+    dragState.current = { id: taskId, startY: e.clientY, rects };
+    setDragId(taskId);
+    try {
+      e.target.setPointerCapture && e.target.setPointerCapture(e.pointerId);
+    } catch (err) {}
+  }
+
+  function handlePointerMove(e) {
+    const st = dragState.current;
+    if (!st) return;
+    const y = e.clientY;
+    let target = 0;
+    for (let i = 0; i < st.rects.length; i++) {
+      const mid = st.rects[i].top + st.rects[i].height / 2;
+      if (y > mid) target = i + 1;
+    }
+    st.pendingIndex = Math.min(target, st.rects.length - 1);
+  }
+
+  function handlePointerUp() {
+    const st = dragState.current;
+    if (st && st.pendingIndex != null) {
+      reorderToday(st.id, st.pendingIndex);
+    }
+    dragState.current = null;
+    setDragId(null);
+  }
+
+  function nudge(id, dir) {
+    const todayIds = tasks.filter((t) => t.bucket === 'today').map((t) => t.id);
+    const from = todayIds.indexOf(id);
+    if (from === -1) return;
+    reorderToday(id, from + dir);
+  }
+
   if (loading) {
     return <div style={{ padding: 40, textAlign: 'center', color: COLORS.textMuted }}>Loading tasks…</div>;
   }
@@ -2390,21 +2924,25 @@ function TasksModule() {
     { id: 'week', label: 'THIS WEEK' },
   ];
 
+  const todayAll = tasks.filter((t) => t.bucket === 'today');
+  const todayOpen = todayAll.filter((t) => !t.done);
+  const todayDone = todayAll.filter((t) => t.done);
+  const focus = todayOpen.slice(0, FOCUS_COUNT);
+  const waiting = todayOpen.slice(FOCUS_COUNT);
+
   return (
-    <div style={{ padding: 16 }}>
+    <div style={{ padding: 16 }} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={handlePointerUp}>
       <div style={{ ...cardStyle, marginBottom: 20 }}>
-        <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
-          <input
-            type="text"
-            placeholder="Type a task, hit enter…"
-            value={newText}
-            onChange={(e) => setNewText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') addTask();
-            }}
-            style={{ ...inputStyle, flex: 1, fontFamily: 'Inter, sans-serif', fontSize: 14 }}
-          />
-        </div>
+        <input
+          type="text"
+          placeholder="Type a task, hit enter…"
+          value={newText}
+          onChange={(e) => setNewText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') addTask();
+          }}
+          style={{ ...inputStyle, width: '100%', fontFamily: 'Inter, sans-serif', fontSize: 14, marginBottom: 10, boxSizing: 'border-box' }}
+        />
         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
           <span style={{ fontFamily: 'Oswald, sans-serif', fontSize: 10, letterSpacing: 1, color: COLORS.textMuted, marginRight: 2 }}>PRIORITY</span>
           {[1, 2, 3, 4, 5].map((p) => (
@@ -2412,14 +2950,14 @@ function TasksModule() {
               key={p}
               onClick={() => setNewPriority(p)}
               style={{
-                width: 30,
-                height: 30,
+                width: 28,
+                height: 28,
                 borderRadius: '50%',
                 border: `2px solid ${PRIORITY_COLORS[p]}`,
                 background: newPriority === p ? PRIORITY_COLORS[p] : 'transparent',
                 color: newPriority === p ? '#fff' : PRIORITY_COLORS[p],
                 fontFamily: 'JetBrains Mono, monospace',
-                fontSize: 13,
+                fontSize: 12,
                 fontWeight: 600,
                 cursor: 'pointer',
               }}
@@ -2447,80 +2985,149 @@ function TasksModule() {
         </div>
       </div>
 
-      {buckets.map((b) => {
-        const items = tasks
-          .filter((t) => t.bucket === b.id)
-          .sort((a, b2) => (a.done === b2.done ? a.priority - b2.priority : a.done ? 1 : -1));
-        return (
-          <div key={b.id} style={{ marginBottom: 22 }}>
-            <div style={{ fontFamily: 'Oswald, sans-serif', fontSize: 14, letterSpacing: 1.5, color: COLORS.accentGold, marginBottom: 10 }}>
-              {b.label} {items.length > 0 && <span style={{ color: COLORS.textMuted, fontSize: 12 }}>({items.filter((t) => !t.done).length})</span>}
+      {/* ---- FOCUS FIVE ---- */}
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 10 }}>
+        <span style={{ fontFamily: 'Oswald, sans-serif', fontSize: 15, letterSpacing: 1.5, color: COLORS.accentGold }}>THE FIVE</span>
+        <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 11, color: COLORS.textMuted }}>
+          {todayDone.length} done today
+        </span>
+      </div>
+
+      {focus.length === 0 && (
+        <div style={{ ...cardStyle, textAlign: 'center', padding: '24px 14px' }}>
+          <div style={{ fontFamily: 'Oswald, sans-serif', fontSize: 14, color: COLORS.success, letterSpacing: 1 }}>
+            {todayDone.length > 0 ? 'ALL CLEAR' : 'NOTHING QUEUED'}
+          </div>
+          <div style={{ fontFamily: 'Inter, sans-serif', fontSize: 12, color: COLORS.textMuted, marginTop: 6 }}>
+            {todayDone.length > 0 ? 'Everything on today’s list is done.' : 'Add a task above to get started.'}
+          </div>
+        </div>
+      )}
+
+      <div ref={listRef}>
+        {focus.map((t, i) => (
+          <div key={t.id} style={{ position: 'relative' }}>
+            <TaskRow
+              task={t}
+              index={i}
+              rank={i + 1}
+              isDragging={dragId === t.id}
+              onPointerDownGrip={(e) => handleGripDown(e, t.id)}
+              onToggle={() => toggleDone(t.id)}
+              onRemove={() => removeTask(t.id)}
+              onMove={(b) => moveToBucket(t.id, b)}
+              buckets={buckets}
+              currentBucket="today"
+              showMoveControls={true}
+            />
+            <div style={{ position: 'absolute', right: 8, bottom: 12, display: 'flex', gap: 2 }}>
+              <button
+                onClick={() => nudge(t.id, -1)}
+                style={nudgeBtn}
+                aria-label="Move up"
+              >
+                <ChevronUp size={12} />
+              </button>
+              <button
+                onClick={() => nudge(t.id, 1)}
+                style={nudgeBtn}
+                aria-label="Move down"
+              >
+                <ChevronDown size={12} />
+              </button>
             </div>
-            {items.length === 0 && <div style={{ fontFamily: 'Inter, sans-serif', fontSize: 12, color: COLORS.textMuted, fontStyle: 'italic' }}>Nothing here</div>}
-            {items.map((t) => (
-              <div key={t.id} style={cardStyle}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <span
-                    style={{
-                      width: 22,
-                      height: 22,
-                      borderRadius: '50%',
-                      border: `2px solid ${PRIORITY_COLORS[t.priority]}`,
-                      color: PRIORITY_COLORS[t.priority],
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      fontFamily: 'JetBrains Mono, monospace',
-                      fontSize: 11,
-                      fontWeight: 600,
-                      flexShrink: 0,
-                    }}
-                  >
-                    {t.priority}
-                  </span>
-                  <span
-                    style={{
-                      flex: 1,
-                      fontFamily: 'Inter, sans-serif',
-                      fontSize: 13,
-                      color: COLORS.text,
-                      textDecoration: t.done ? 'line-through' : 'none',
-                      opacity: t.done ? 0.5 : 1,
-                    }}
-                  >
-                    {t.text}
-                  </span>
-                  <CheckCircle done={t.done} onToggle={() => toggleDone(t.id)} small />
-                  <button onClick={() => removeTask(t.id)} style={{ background: 'none', border: 'none', color: COLORS.textMuted, cursor: 'pointer', padding: 0 }}>
-                    <Trash2 size={14} />
-                  </button>
-                </div>
-                {!t.done && (
-                  <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
-                    {buckets
-                      .filter((ob) => ob.id !== b.id)
-                      .map((ob) => (
-                        <button
-                          key={ob.id}
-                          onClick={() => moveToBucket(t.id, ob.id)}
-                          style={{
-                            padding: '3px 9px',
-                            borderRadius: 5,
-                            border: `1px solid ${COLORS.line}`,
-                            background: 'none',
-                            color: COLORS.textMuted,
-                            fontFamily: 'Oswald, sans-serif',
-                            fontSize: 9,
-                            letterSpacing: 0.5,
-                            cursor: 'pointer',
-                          }}
-                        >
-                          → {ob.label}
-                        </button>
-                      ))}
-                  </div>
-                )}
+          </div>
+        ))}
+
+        {/* waiting list, collapsed by default */}
+        {waiting.length > 0 && (
+          <>
+            <button
+              onClick={() => setShowWaiting(!showWaiting)}
+              style={{
+                width: '100%',
+                background: 'none',
+                border: `1px dashed ${COLORS.line}`,
+                borderRadius: 8,
+                color: COLORS.textMuted,
+                padding: '10px 0',
+                fontFamily: 'Oswald, sans-serif',
+                fontSize: 11,
+                letterSpacing: 1,
+                cursor: 'pointer',
+                marginTop: 4,
+                marginBottom: 10,
+              }}
+            >
+              {showWaiting ? 'HIDE' : `${waiting.length} MORE WAITING`}
+            </button>
+            {showWaiting &&
+              waiting.map((t, i) => (
+                <TaskRow
+                  key={t.id}
+                  task={t}
+                  index={FOCUS_COUNT + i}
+                  rank={FOCUS_COUNT + i + 1}
+                  dimmed
+                  isDragging={dragId === t.id}
+                  onPointerDownGrip={(e) => handleGripDown(e, t.id)}
+                  onToggle={() => toggleDone(t.id)}
+                  onRemove={() => removeTask(t.id)}
+                  onMove={(b) => moveToBucket(t.id, b)}
+                  buckets={buckets}
+                  currentBucket="today"
+                  showMoveControls={true}
+                />
+              ))}
+          </>
+        )}
+      </div>
+
+      {todayDone.length > 0 && (
+        <details style={{ marginTop: 8, marginBottom: 20 }}>
+          <summary style={{ fontFamily: 'Oswald, sans-serif', fontSize: 11, letterSpacing: 1, color: COLORS.textMuted, cursor: 'pointer' }}>
+            COMPLETED TODAY ({todayDone.length})
+          </summary>
+          <div style={{ marginTop: 8 }}>
+            {todayDone.map((t) => (
+              <div key={t.id} style={{ ...cardStyle, display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', marginBottom: 6 }}>
+                <span style={{ flex: 1, fontSize: 12.5, color: COLORS.textMuted, textDecoration: 'line-through' }}>{t.text}</span>
+                <CheckCircle done={true} onToggle={() => toggleDone(t.id)} small />
+                <button onClick={() => removeTask(t.id)} style={{ background: 'none', border: 'none', color: COLORS.textMuted, cursor: 'pointer', padding: 0 }}>
+                  <Trash2 size={13} />
+                </button>
               </div>
+            ))}
+          </div>
+        </details>
+      )}
+
+      {/* ---- STAGING BUCKETS ---- */}
+      {buckets.slice(1).map((b) => {
+        const items = tasks.filter((t) => t.bucket === b.id).sort((x, y) => (x.done === y.done ? x.priority - y.priority : x.done ? 1 : -1));
+        return (
+          <div key={b.id} style={{ marginTop: 24 }}>
+            <div style={{ fontFamily: 'Oswald, sans-serif', fontSize: 13, letterSpacing: 1.5, color: COLORS.textMuted, marginBottom: 10 }}>
+              {b.label} {items.length > 0 && <span style={{ fontSize: 11 }}>({items.filter((t) => !t.done).length})</span>}
+            </div>
+            {items.length === 0 && (
+              <div style={{ fontFamily: 'Inter, sans-serif', fontSize: 12, color: COLORS.textMuted, fontStyle: 'italic' }}>Nothing here</div>
+            )}
+            {items.map((t) => (
+              <TaskRow
+                key={t.id}
+                task={t}
+                index={0}
+                rank={null}
+                isDragging={false}
+                onPointerDownGrip={(e) => e.preventDefault()}
+                onToggle={() => toggleDone(t.id)}
+                onRemove={() => removeTask(t.id)}
+                onMove={(nb) => moveToBucket(t.id, nb)}
+                buckets={buckets}
+                currentBucket={b.id}
+                showMoveControls={true}
+              />
             ))}
           </div>
         );
@@ -2528,6 +3135,20 @@ function TasksModule() {
     </div>
   );
 }
+
+const nudgeBtn = {
+  width: 22,
+  height: 18,
+  background: COLORS.surface2,
+  border: `1px solid ${COLORS.line}`,
+  borderRadius: 4,
+  color: COLORS.textMuted,
+  cursor: 'pointer',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  padding: 0,
+};
 
 function VisionBoard({ items, setItems, editable }) {
   const [busy, setBusy] = useState(false);
@@ -2694,6 +3315,7 @@ function MorningFlow({ onComplete }) {
           background: COLORS.bg,
           borderLeft: `1px solid ${COLORS.line}`,
           borderRight: `1px solid ${COLORS.line}`,
+          color: COLORS.text,
           padding: 'calc(28px + env(safe-area-inset-top, 0px)) 20px calc(40px + env(safe-area-inset-bottom, 0px))',
           boxSizing: 'border-box',
         }}
@@ -2940,7 +3562,7 @@ export default function App() {
     return (
       <div style={{ minHeight: '100vh', background: '#0B0C0E', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         <style>{FONTS}</style>
-        <div style={{ fontFamily: 'Oswald, sans-serif', fontSize: 13, letterSpacing: 3, color: '#8B909A' }}>GRIND LOG</div>
+        <div style={{ fontFamily: 'Oswald, sans-serif', fontSize: 13, letterSpacing: 3, color: '#8B909A' }}>SUCCESS</div>
       </div>
     );
   }
@@ -2960,6 +3582,7 @@ export default function App() {
           borderLeft: `1px solid ${COLORS.line}`,
           borderRight: `1px solid ${COLORS.line}`,
           boxShadow: '0 0 60px rgba(0,0,0,0.5)',
+          color: COLORS.text,
         }}
       >
         <div
